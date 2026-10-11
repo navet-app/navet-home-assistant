@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.18.0-beta.1 (2026-10-11)
+
+## New features
+
+- Added integration reload for Home Assistant entities, including unavailable cards.
+- Home Assistant timers, counters, valves, and remotes now have dashboard cards with their supported controls.
+
+## Improvements and bug fixes
+
+- Keep after-completion chores actionable until finished, restart each person's interval independently, and move superseded scheduled chores into missed history.
+- Fixed stale provider state after reconnecting and missed openHAB live updates.
+
 ## 0.17.8 (2026-10-08)
 
 ## Improvements and bug fixes

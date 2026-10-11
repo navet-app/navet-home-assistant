@@ -231,6 +231,12 @@ def _normalize_data(value: Any) -> dict[str, Any]:
     ):
         raise ChoreStorageError("Chore workspace data is invalid")
     data = json.loads(json.dumps(value))
+    for occurrence in data["occurrencesById"].values():
+        if isinstance(occurrence, Mapping) and "supersededAt" in occurrence:
+            try:
+                _parse_iso(occurrence["supersededAt"])
+            except (TypeError, ValueError, ChoreAuthorityError) as err:
+                raise ChoreStorageError("Chore supersession timestamp is invalid") from err
     for participant in data["participantsById"].values():
         if isinstance(participant, Mapping) and participant.get("resumeAt"):
             try:
@@ -803,20 +809,125 @@ def _vacation_reschedule(data: dict[str, Any], action: Mapping[str, Any], timest
     return data, activities
 
 
+def _recurrence_participant_ids(item, participant_ids):
+    prefix = f"{item['definitionId']}:"
+    occurrence_id = item["id"]
+    has_lineage = False
+    while occurrence_id.startswith(prefix):
+        instant = occurrence_id[len(prefix):len(prefix) + 24]
+        if occurrence_id[len(prefix) + 24:len(prefix) + 25] != ":":
+            break
+        try:
+            if _iso(_parse_iso(instant)) != instant:
+                break
+        except ChoreAuthorityError:
+            break
+        slot = occurrence_id[len(prefix) + 25:]
+        source = item.get("carriedForwardFrom")
+        if occurrence_id == item["id"] and source and slot in {f"vacation:{source}", f"carry:{source}"}:
+            occurrence_id = source
+            has_lineage = True
+        elif slot in participant_ids:
+            return [slot]
+        elif has_lineage and slot.startswith(f"vacation:{prefix}"):
+            occurrence_id = slot[9:]
+        elif has_lineage and slot.startswith(f"carry:{prefix}"):
+            occurrence_id = slot[6:]
+        else:
+            return item.get("assigneeIds", [])
+    # Preserve imported noncanonical IDs without guessing their original assignment.
+    return item.get("assigneeIds", [])
+
+
+def _should_prune_occurrence(item, definitions, occurrences, boundary, participant_ids):
+    if item.get("status") not in {"done", "skipped"}:
+        return False
+    resolved = item.get("completedAt") or item.get("skippedAt") or item["updatedAt"]
+    if _parse_iso(resolved) >= boundary:
+        return False
+    definition = definitions.get(item["definitionId"], {})
+    if definition.get("schedule", {}).get("frequency") == "after_completion" and item.get("completedAt"):
+        newer = any(next_item.get("definitionId") == item["definitionId"]
+            and next_item.get("completedAt")
+            and _parse_iso(next_item["completedAt"]) > _parse_iso(item["completedAt"])
+            and next_item.get("status") == "done"
+            and (definition.get("assignment", {}).get("mode") != "everyone"
+                or _recurrence_participant_ids(item, participant_ids)[0] in _recurrence_participant_ids(next_item, participant_ids))
+            for next_item in occurrences.values())
+        if not newer:
+            return False
+    return True
+
+
+def _retain_supersession(occurrences, definitions, timestamp, activities=(), participant_ids=None):
+    result = dict(occurrences)
+    for occurrence_id, item in occurrences.items():
+        if item.get("status") != "missed" or item.get("supersededAt"):
+            continue
+        definition = definitions.get(item.get("definitionId"))
+        successor = _superseding_occurrence(item, definition, occurrences, timestamp, participant_ids) if definition else None
+        event = next((activity for activity in activities
+            if activity.get("occurrenceId") == item.get("id") and activity.get("type") == "missed"
+            and activity.get("reason") == "Next scheduled occurrence started"), None)
+        superseded_at = successor["scheduledAt"] if successor else event.get("timestamp") if event else None
+        if superseded_at:
+            result[occurrence_id] = {**item, "supersededAt": superseded_at}
+    return result
+
+
+def _superseding_occurrence(item, definition, occurrences, timestamp, participant_ids=None):
+    if definition.get("schedule", {}).get("frequency") in {"once", "after_completion"}:
+        return None
+    known_ids = participant_ids if participant_ids is not None else definition.get("assignment", {}).get("participantIds", [])
+    candidates = [next_item for next_item in occurrences.values()
+        if next_item.get("definitionId") == item["definitionId"]
+        and not next_item.get("carriedForwardTo")
+        # Vacation moves keep their calendar slot; automatic carry-forward is the same work.
+        and (not next_item.get("carriedForwardFrom")
+            or not next_item.get("assignmentSlot", "").startswith("carry:"))
+        and _parse_iso(item["scheduledAt"]) < _parse_iso(next_item["scheduledAt"]) <= _parse_iso(timestamp)
+        and (definition.get("assignment", {}).get("mode") != "everyone"
+            or any(participant_id in _recurrence_participant_ids(item, known_ids)
+                for participant_id in _recurrence_participant_ids(next_item, known_ids)))]
+    return min(candidates, key=lambda value: _parse_iso(value["scheduledAt"]), default=None)
+
+
 def _materialize(data: dict[str, Any], range_start: str, range_end: str, timestamp: str, command_id: str, recurrence_definition_id: str | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     start = _parse_iso(range_start)
     end = _parse_iso(range_end)
     if end < start or end - start > timedelta(days=180):
         raise ChoreAuthorityError("Chore materialization range is invalid")
-    occurrences = dict(data["occurrencesById"])
+    occurrences = _retain_supersession(data["occurrencesById"], data["definitionsById"], timestamp, data.get("activity", []), data["participantsById"])
     past_occurrences = list(occurrences.values())
     additions: list[dict[str, Any]] = []
     recurrence_ids: set[str] = set()
+    personal_removed_ids: set[str] = set()
     for definition in data["definitionsById"].values():
         if not definition.get("enabled") or definition.get("archivedAt"):
             continue
         definition_additions_start = len(additions)
         schedule = definition.get("schedule", {})
+        if schedule.get("frequency") == "after_completion" and definition.get("assignment", {}).get("mode") == "everyone":
+            for participant_id in definition["assignment"]["participantIds"]:
+                personal = {key: item for key, item in occurrences.items()
+                    if item.get("definitionId") == definition["id"] and participant_id in _recurrence_participant_ids(item, data["participantsById"])}
+                personal_definition = {**definition, "assignment": {**definition["assignment"], "mode": "person", "participantIds": [participant_id]}}
+                personal_data = {**data, "definitionsById": {definition["id"]: personal_definition}, "occurrencesById": personal}
+                materialized, events = _materialize(personal_data, range_start, range_end, timestamp, command_id, recurrence_definition_id)
+                personal_removed_ids.update(set(personal) - set(materialized["occurrencesById"]))
+                for key in personal:
+                    occurrences.pop(key, None)
+                occurrences.update(materialized["occurrencesById"])
+                recurrence_ids.update(materialized["occurrencesById"])
+                additions.extend(events)
+            continue
+        if schedule.get("frequency") == "after_completion":
+            outstanding = [item for item in occurrences.values()
+                if item.get("definitionId") == definition["id"] and not item.get("completedAt")
+                and not item.get("carriedForwardTo") and not item.get("supersededAt") and item.get("status") in {"available", "claimed", "missed"}]
+            if outstanding:
+                recurrence_ids.add(min(outstanding, key=lambda item: _parse_iso(item["scheduledAt"]))["id"])
+                continue
         hourly_instants: list[datetime] = []
         hourly_indices: list[int] = []
         if schedule.get("frequency") == "hourly":
@@ -835,10 +946,11 @@ def _materialize(data: dict[str, Any], range_start: str, range_end: str, timesta
             dates = [instant.astimezone(_zone(time_zone)).date() for instant in hourly_instants]
         elif schedule.get("frequency") == "after_completion":
             completed = sorted(
-                occurrence["completedAt"]
-                for occurrence in occurrences.values()
-                if occurrence.get("definitionId") == definition.get("id")
-                and isinstance(occurrence.get("completedAt"), str)
+                (occurrence["completedAt"]
+                 for occurrence in occurrences.values()
+                 if occurrence.get("definitionId") == definition.get("id")
+                 and isinstance(occurrence.get("completedAt"), str)),
+                key=_parse_iso,
             )
             time_zone = str(schedule.get("timeZone") or "UTC")
             if completed:
@@ -853,7 +965,7 @@ def _materialize(data: dict[str, Any], range_start: str, range_end: str, timesta
             local_end = end.astimezone(_zone(time_zone)).date()
             end_date = date.fromisoformat(str(schedule["endDate"])) if schedule.get("endDate") else None
             dates = [candidate] if (
-                (definition["id"] == recurrence_definition_id or local_start <= candidate <= local_end)
+                (definition["id"] == recurrence_definition_id or candidate < local_start or local_start <= candidate <= local_end)
                 and (end_date is None or candidate <= end_date)
                 and candidate.isoformat() not in schedule.get("excludedDates", [])
             ) else []
@@ -898,7 +1010,7 @@ def _materialize(data: dict[str, Any], range_start: str, range_end: str, timesta
                     ) for time_value in times_for_slot
                 ]
                 for scheduled in scheduled_values:
-                    if definition["id"] != recurrence_definition_id and not (start <= scheduled <= end):
+                    if definition["id"] != recurrence_definition_id and not (schedule.get("frequency") == "after_completion" and scheduled < start) and not (start <= scheduled <= end):
                         continue
                     scheduled_iso = _iso(scheduled)
                     occurrence_id = _occurrence_id(str(definition["id"]), scheduled_iso, slot)
@@ -938,13 +1050,14 @@ def _materialize(data: dict[str, Any], range_start: str, range_end: str, timesta
         and not any(_participant_paused(data["participantsById"][participant_id], _parse_iso(item["scheduledAt"]))
                     for participant_id in item.get("assigneeIds", []) if participant_id in data["participantsById"])
     }
+    removed_ids.update(personal_removed_ids)
     occurrences = {key: item for key, item in occurrences.items() if key not in removed_ids}
     outbox = [item for item in data["outbox"] if item.get("status") == "delivered" or item.get("occurrenceId") not in removed_ids]
-    retention = _now() - timedelta(days=RETENTION_DAYS)
+    retention = _parse_iso(timestamp) - timedelta(days=RETENTION_DAYS)
     occurrences = {
         key: value
         for key, value in occurrences.items()
-        if not (value.get("status") in {"done", "skipped"} and _parse_iso(value.get("scheduledAt", timestamp)) < retention)
+        if not _should_prune_occurrence(value, data["definitionsById"], occurrences, retention, data["participantsById"])
     }
     return {**data, "occurrencesById": occurrences, "outbox": outbox}, additions
 
@@ -1188,7 +1301,7 @@ def _apply_occurrence(data: dict[str, Any], occurrence_id: str, command: Mapping
         elif action_type == "reopen":
             if occurrence.get("status") not in {"done", "skipped", "missed"}:
                 raise ChoreAuthorityError("Only completed, skipped, or missed chores can be reopened")
-            for key in ("claimedBy", "claimedAt", "completedBy", "completedAt", "approvedBy", "approvedAt", "skippedBy", "skippedAt", "missedAt", "carriedForwardTo"):
+            for key in ("claimedBy", "claimedAt", "completedBy", "completedAt", "approvedBy", "approvedAt", "skippedBy", "skippedAt", "missedAt", "supersededAt", "carriedForwardTo"):
                 next_occurrence.pop(key, None)
             next_occurrence.update(status="available")
             event_type = "reopened"
@@ -1708,6 +1821,7 @@ class ChoreAuthority:
         return str(action.get("type")) in {"participant_create", "participant_update", "definition_create", "definition_update", "definition_archive", "definition_restore", "definition_delete", "retention_update", "experience_update", "experience_points_adjust", "reward_decision", "vacation_reschedule"}
 
     def _apply_workspace_action(self, data: dict[str, Any], action: Mapping[str, Any], timestamp: str, command_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        data = {**data, "occurrencesById": _retain_supersession(data["occurrencesById"], data["definitionsById"], timestamp, data.get("activity", []), data["participantsById"])}
         action_type = str(action.get("type"))
         actor = str(action.get("actorParticipantId", ""))
         if action_type == "participant_create":
@@ -1789,7 +1903,7 @@ class ChoreAuthority:
             next_definition = {**definition, "enabled": action_type == "definition_restore", "updatedAt": timestamp}
             if action_type == "definition_archive":
                 next_definition["archivedAt"] = timestamp
-                data["occurrencesById"] = {key: item for key, item in data["occurrencesById"].items() if item.get("definitionId") != definition_id or item.get("status") in {"done", "skipped"}}
+                data["occurrencesById"] = {key: item for key, item in data["occurrencesById"].items() if item.get("definitionId") != definition_id or item.get("status") in {"done", "skipped"} or (item.get("status") == "missed" and (item.get("supersededAt") or item.get("carriedForwardTo")))}
             else:
                 next_definition.pop("archivedAt", None)
             data["definitionsById"] = {**data["definitionsById"], definition_id: next_definition}
@@ -2143,12 +2257,19 @@ class ChoreAuthority:
                 if occurrence.get("status") not in {"available", "claimed"}:
                     continue
                 definition = data["definitionsById"].get(occurrence.get("definitionId"), {})
-                missed = definition.get("missedPolicy") or {}
+                if definition.get("schedule", {}).get("frequency") == "after_completion":
+                    continue
+                superseding = _superseding_occurrence(occurrence, definition, occurrences, timestamp, data["participantsById"])
+                missed = {"graceMinutes": 0, "action": "none"} if superseding else definition.get("missedPolicy") or {}
                 grace = missed.get("graceMinutes")
-                if not isinstance(grace, int) or now < due + timedelta(minutes=grace):
+                boundary = _parse_iso(superseding["scheduledAt"]) if superseding else due + timedelta(minutes=grace or 0)
+                if not isinstance(grace, int) or now < boundary:
                     continue
                 policy_action = missed.get("action")
-                if policy_action not in {"skip", "carry_forward"}:
+                if not superseding and (
+                    policy_action not in {"none", "skip", "carry_forward"}
+                    or (policy_action == "none" and definition.get("schedule", {}).get("frequency") != "once")
+                ):
                     continue
                 occurrence["status"] = "skipped" if policy_action == "skip" else "missed"
                 occurrence["updatedAt"] = timestamp
@@ -2156,6 +2277,8 @@ class ChoreAuthority:
                     occurrence["skippedAt"] = timestamp
                 else:
                     occurrence["missedAt"] = timestamp
+                if superseding:
+                    occurrence["supersededAt"] = superseding["scheduledAt"]
                 activities.append(
                     _activity(
                         f"scheduler:missed:{occurrence_id}:{timestamp}",
@@ -2163,7 +2286,7 @@ class ChoreAuthority:
                         "skipped" if policy_action == "skip" else "missed",
                         occurrenceId=occurrence_id,
                         definitionId=occurrence.get("definitionId"),
-                        reason="Missed-work policy",
+                        reason="Next scheduled occurrence started" if superseding else "Missed-work policy",
                     )
                 )
                 if policy_action == "carry_forward":

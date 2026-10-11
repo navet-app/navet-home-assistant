@@ -14,5 +14,5 @@
   "documentation": "https://github.com/navet-app/navet",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/navet-app/navet/issues",
-  "version": "0.17.8"
+  "version": "0.18.0-beta.1"
 }
