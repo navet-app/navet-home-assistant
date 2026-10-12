@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.18.0 (2026-10-12)
+
+## New features
+
+- Added integration reload for Home Assistant entities, including unavailable cards.
+- Home Assistant timers, counters, valves, and remotes now have dashboard cards with their supported controls.
+
+## Improvements and bug fixes
+
+- Keep after-completion chores actionable until finished, restart each person's interval independently, and move superseded scheduled chores into missed history.
+- Deployed Dev builds show their version in About Navet; published Dev builds retain their identity on loopback addresses too.
+- Fixed stale provider state after reconnecting and missed openHAB live updates.
+
 ## 0.18.0-beta.2 (2026-10-12)
 
 ## New features
