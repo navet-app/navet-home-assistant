@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.1-beta.1 (2026-10-14)
+
+## Improvements and bug fixes
+
+- Fix stuck chore completion and reset, and automatically repair and compress affected storage on upgrade without losing history.
+
 ## 0.18.0 (2026-10-12)
 
 ## New features
