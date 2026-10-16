@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.3-beta.1 (2026-10-16)
+
+## New features
+
+- Export chore settings and appearance without completion history or earned progress.
+
 ## 0.18.2 (2026-10-15)
 
 ## Improvements and bug fixes
