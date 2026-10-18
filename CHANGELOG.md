@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.18.4 (2026-10-18)
+
+No user-facing changes in this release.
+
 ## 0.18.4-beta.1 (2026-10-18)
 
 No user-facing changes in this release.
