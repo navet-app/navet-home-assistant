@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.18.5 (2026-10-19)
+
+## Improvements and bug fixes
+
+- Camera playback starts without waiting for unused fallback streams to initialize.
+- Connected security sensors no longer raise alerts; disconnected sensors do, and the Security guide explains alert states.
+- Restore individual hidden entities or all at once, with hidden samples available to try in the demo.
+
 ## 0.18.5-beta.1 (2026-10-19)
 
 ## Improvements and bug fixes
