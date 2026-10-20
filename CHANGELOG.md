@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.18.6-beta.2 (2026-10-20)
+
+No user-facing changes in this release.
+
 ## 0.18.5 (2026-10-19)
 
 ## Improvements and bug fixes
