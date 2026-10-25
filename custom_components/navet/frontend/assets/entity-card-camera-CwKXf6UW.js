@@ -1,0 +1,1 @@
+import{i as e}from"./rolldown-runtime-qXqUbbKo.js";import{J as t,q as n}from"./assistant-ui-vendor-DcGl0S1x.js";import{G as r,bf as i}from"./dashboard-core-4CeXCVjG.js";var a=i(),o=e(t(),1),s=n(),c=(0,o.memo)(function(e){let t=(0,a.c)(2),n;return t[0]===e?n=t[1]:(n=(0,s.jsx)(r,{...e}),t[0]=e,t[1]=n),n});export{c as t};
