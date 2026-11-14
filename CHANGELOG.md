@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.19.2 (2026-11-14)
+
+No user-facing changes in this release.
+
 ## 0.19.2-beta.1 (2026-11-14)
 
 No user-facing changes in this release.
